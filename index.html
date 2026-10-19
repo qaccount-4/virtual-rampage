@@ -598,7 +598,7 @@ function updateMovement(dt) {
   if (stuck) P.addScaledVector(corr, 1 / stuck);
 
   // Air jump: in mid-air, a hard downward push spawns a platform under that hand
-  if (!stuck && !playerGrounded && platformsLeft > 0) {
+  if (!stuck && !playerGrounded && platformsLeft > 0 && now >= airHoldUntil) {
     for (const h of active) {
       if (!handFree(h) || h.localVel.y > -CONFIG.platformPushSpeed || now - h.lastPlatform < 0.25) continue;
       h.grip.getWorldPosition(handWorld);
@@ -618,7 +618,7 @@ function updateMovement(dt) {
     h.grip.getWorldPosition(handWorld);
     const prevY = h.prevWorldY;
     h.prevWorldY = handWorld.y;
-    if (h.touching || !handFree(h) || now < dashUntil) continue;
+    if (h.touching || !handFree(h) || now < dashUntil || (now < airHoldUntil && !playerGrounded)) continue;
     const hit = penetration(handWorld, CONFIG.handRadius, prevY);
     if (!hit) continue;
     P.addScaledVector(hit.n, hit.depth);
@@ -808,9 +808,11 @@ function fireAttack(h, kind, detail, dir) {
     // Little hop straight up off the ground
     launchPlayer(new THREE.Vector3(0, CONFIG.sUpperHop, 0), 0.1);
   } else if (kind === 'SUPPERCUT' && platformsLeft > 0) {
-    // In the air: big rise straight up, sideways momentum stops. Uses up one of your air jumps.
+    // In the air: big rise in the direction your fist went (old momentum stops). Uses up one of your air jumps.
     platformsLeft--;
-    launchPlayer(new THREE.Vector3(0, CONFIG.sUpperRise, 0), 0.2);
+    const d = dir.clone();
+    if (d.lengthSq() < 1e-6 || d.y <= 0) d.set(0, 1, 0); else d.normalize();
+    launchPlayer(d.multiplyScalar(CONFIG.sUpperRise), 0.2);
   }
   const airSlam = kind === 'SSLAM' && !playerGrounded && !hands.some(o => o.touching) && !playerNearGround();
   if (airSlam) {
@@ -890,6 +892,19 @@ function updateDashAttack() {
   log(`${a.name}${hit ? '' : ' (miss)'}`, ATTACK_COLORS[a.kind]);
 }
 
+// Is the fight in the air (you or the dummy)?
+function fightInAir() {
+  return (!D.grounded && groundBelow(dummy.position, CONFIG.airAttackHeight) === null) ||
+    (!playerGrounded && !hands.some(o => o.touching) && !playerNearGround());
+}
+// Freeze both fighters in place for a moment (mid-air jabs and dash jabs)
+function freezeBoth() {
+  airHoldUntil = now + CONFIG.airJabHold;
+  bodyVel.set(0, 0, 0); posHistory.length = 0; dashUntil = 0; runSpeed = 0;
+  attackMoveUntil = 0; attackMoveActive = false;
+  D.vel.set(0, 0, 0); D.holdUntil = now + CONFIG.airJabHold;
+}
+
 function hitDummy(kind, away) {
   D.holdUntil = 0;
   hitstopUntil = now + (SPECIALS.has(kind) ? CONFIG.hitstopSpecial : CONFIG.hitstopLight);
@@ -899,6 +914,7 @@ function hitDummy(kind, away) {
   if (kind === 'RUNJAB') {
     D.damage += CONFIG.runningJabDamage; drawLabel();
     D.flinch = 0.4; D.stun = CONFIG.runningJabStun; D.jabCount = 0;
+    if (fightInAir()) freezeBoth();   // mid-air dash jab: both of you stop dead
     return `Stunned for ${CONFIG.runningJabStun} s · +${CONFIG.runningJabDamage}%`;
   }
 
@@ -944,15 +960,10 @@ function hitDummy(kind, away) {
     D.lastJab = now;
     D.jabCount++;
     // In mid-air (you or the dummy), a jab freezes both of you in place; keep jabbing to stay frozen
-    const inAir = (!D.grounded && groundBelow(dummy.position, CONFIG.airAttackHeight) === null) ||
-      (!playerGrounded && !hands.some(o => o.touching) && !playerNearGround());
-    if (inAir) {
-      airHoldUntil = now + CONFIG.airJabHold;
-      bodyVel.set(0, 0, 0);
-      attackMoveUntil = 0; attackMoveActive = false;
-    }
+    const inAir = fightInAir();
+    if (inAir) { airHoldUntil = now + CONFIG.airJabHold; bodyVel.set(0, 0, 0); posHistory.length = 0; dashUntil = 0; attackMoveUntil = 0; attackMoveActive = false; }
     if (D.jabCount < 4) {
-      if (inAir) { D.vel.set(0, 0, 0); D.holdUntil = now + CONFIG.airJabHold; }
+      if (inAir) freezeBoth();
       D.damage += CONFIG.jabDamage; drawLabel();
       D.flinch = 0.35; D.stun = Math.max(D.stun, CONFIG.jabStun);
       return `Jab ${D.jabCount}/4: stunned · +${CONFIG.jabDamage}%`;
