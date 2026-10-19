@@ -49,6 +49,10 @@ const CONFIG = {
   releaseDistance: 0.003,    // meters: how far your hand must pull away from a surface to let go
   playerGroundFriction: 8,   // how fast you stop sliding when standing
   // --- Air jump platforms ---
+  // Ledge climb: grab the top of a ledge and you get pulled up onto it
+  mantleReach: 0.5,          // m: how far below the ledge top your head can be and still get pulled up
+  mantleTime: 0.25,          // seconds the pull-up takes
+  mantleInset: 0.35,         // m: how far onto the ledge you end up
   airPlatforms: 3,           // platforms per jump; refill when you land or grab a ledge
   platformPushSpeed: 2.0,    // m/s: how hard you must push a hand downward in mid-air to spawn one
   platformLife: 0.6,         // seconds a platform lasts
@@ -279,6 +283,7 @@ const airPlatforms = [];
 let platformsLeft = CONFIG.airPlatforms;
 let airHoldUntil = 0;              // mid-air jab combo: you hang still until this time
 let attackMoveUntil = 0, attackMoveActive = false;
+let mantle = null;   // ledge climb in progress: { from, delta, start }
 const attackMoveVel = new THREE.Vector3();
 
 function spawnPlatform(at) {
@@ -482,7 +487,7 @@ function launchPlayer(vel, duration) {
   wasHolding = false;
   bodyVel.copy(vel);
   playerGrounded = false;
-  airHoldUntil = 0; attackMoveUntil = 0; attackMoveActive = false;
+  airHoldUntil = 0; attackMoveUntil = 0; attackMoveActive = false; mantle = null;
   dashUntil = now + duration;
 }
 
@@ -496,10 +501,43 @@ function bodyPoint(out, rigPos) {
   return out.set(rigPos.x + camera.position.x, rigPos.y + camera.position.y - CONFIG.eyeHeight, rigPos.z + camera.position.z);
 }
 
+// A hand holding the top edge of a ledge with your head close enough below it: pull up onto the ledge
+function tryMantle(active) {
+  for (const h of active) {
+    const b = h.touching && h.touchBox;
+    if (!b || b.temp || h.anchor.y < b.max.y - 0.15) continue;   // must be holding the top of it
+    const top = b.max.y;
+    const feetNow = bodyPoint(tmpV, P);
+    if (feetNow.y >= top - 0.05) continue;                        // already up there
+    if (P.y + camera.position.y < top - CONFIG.mantleReach) continue;   // head too far below the edge
+    const inset = CONFIG.mantleInset;
+    const tx = b.max.x - b.min.x > inset * 2 ? THREE.MathUtils.clamp(feetNow.x, b.min.x + inset, b.max.x - inset) : (b.min.x + b.max.x) / 2;
+    const tz = b.max.z - b.min.z > inset * 2 ? THREE.MathUtils.clamp(feetNow.z, b.min.z + inset, b.max.z - inset) : (b.min.z + b.max.z) / 2;
+    const delta = new THREE.Vector3(tx - feetNow.x, top - feetNow.y, tz - feetNow.z);
+    if (Math.hypot(delta.x, delta.z) > 1.2) continue;             // too far from the edge
+    mantle = { from: P.clone(), delta, start: now };
+    slamDropHand = null; slamLandingPending = false;
+    for (const o of hands) o.touching = false;
+    pulse(h, 0.3, 40);
+    return true;
+  }
+  return false;
+}
+
 function updateMovement(dt) {
   prevP.copy(P);
   updatePlatforms();
   const active = hands.filter(h => h.src && h.src.gamepad);
+  if (mantle) {
+    const t = Math.min(1, (now - mantle.start) / CONFIG.mantleTime);
+    const e = 1 - (1 - t) * (1 - t);
+    P.copy(mantle.from).addScaledVector(mantle.delta, e);
+    bodyVel.set(0, 0, 0); posHistory.length = 0; wasHolding = false;
+    for (const h of hands) { h.touching = false; h.grip.getWorldPosition(handWorld); h.prevWorldY = handWorld.y; }
+    if (t >= 1) { mantle = null; playerGrounded = true; platformsLeft = CONFIG.airPlatforms; }
+    prevFeetY = bodyPoint(feet, P).y;
+    return;
+  }
 
   // How fast each hand is moving, measured from your body (not the world)
   for (const h of active) {
@@ -592,6 +630,8 @@ function updateMovement(dt) {
     if (!hit.box.temp && hit.n.y > -0.5) { platformsLeft = CONFIG.airPlatforms; }
     pulse(h, 0.08, 12);
   }
+
+  if (tryMantle(active)) { prevFeetY = bodyPoint(feet, P).y; return; }
 
   // Walls are solid for your body
   bodyPoint(feet, P);
@@ -1056,7 +1096,7 @@ function respawnPlayer() {
   bodyVel.set(0, 0, 0); posHistory.length = 0;
   for (const h of hands) h.touching = false;
   slamLandingPending = false; slamDropHand = null;
-  airHoldUntil = 0; attackMoveUntil = 0; attackMoveActive = false;
+  airHoldUntil = 0; attackMoveUntil = 0; attackMoveActive = false; mantle = null;
   platformsLeft = CONFIG.airPlatforms;
   playerDamage = 0;
 }
