@@ -23,9 +23,9 @@
   <h1>VR Brawler: Gesture Tester</h1>
   <p>Open this page in the Meta Quest Browser and press <b>Enter VR</b>. Wear your wrist straps and clear your space.</p>
   <p><b>No buttons</b>: grab the ground or walls and push to move, like Gorilla Tag · in mid-air, push a hand down hard for an air platform (3 per jump)</p>
-  <p><b>Trigger +</b> punch forward = jab (4th jab knocks back) · punch up = uppercut · punch down = ground pound · <b>Touch fists together</b> = block bubble (Brawlhalla dodge timing) · <b>B/Y</b> = reset dummy · <b>A/X</b> = dummy fights back on/off</p>
+  <p><b>Trigger +</b> punch forward = jab (4th jab knocks back) · punch up = uppercut · punch down = ground pound · <b>Touch fists together</b> = block bubble (Brawlhalla dodge timing) · <b>B/Y</b> = reset dummy · <b>A/X</b> = dummy AI off / easy / medium / hard</p>
   <p><b>Grip +</b> punch forward = special jab (its momentum carries you forward a little) · punch up = special uppercut · punch down = special slam (hops you up, stuns 1 s) · jab while moving fast = running jab (1 s stun, speeds you up)</p>
-  <p>On a computer: <kbd>1</kbd> jab <kbd>2</kbd> uppercut <kbd>3</kbd> ground pound <kbd>4</kbd> running jab <kbd>5</kbd> special jab <kbd>6</kbd> special uppercut <kbd>7</kbd> special slam · <kbd>R</kbd> resets dummy · <kbd>F</kbd> dummy fights back on/off</p>
+  <p>On a computer: <kbd>1</kbd> jab <kbd>2</kbd> uppercut <kbd>3</kbd> ground pound <kbd>4</kbd> running jab <kbd>5</kbd> special jab <kbd>6</kbd> special uppercut <kbd>7</kbd> special slam · <kbd>R</kbd> resets dummy · <kbd>F</kbd> dummy AI level</p>
 </div>
 
 <script type="module">
@@ -93,6 +93,7 @@ const CONFIG = {
   sSlamSpike: 9.6,            // m/s: special slam on an airborne dummy
   sSlamDrop: 8,              // m/s: how fast you drop straight down after a mid-air special slam
   lightMoveDist: 2.5,        // m: how far a light uppercut / light pound carries you along the punch direction
+  poundHitTime: 0.3,         // seconds a mid-air light pound can still hit after you swing (its attack frames)
   lightMoveSpeed: 10,        // m/s: how fast that move is (2.5 m at 10 m/s = a quarter second)
   airAttackHeight: 0.5,      // m: air attacks only count if your feet AND hands are higher than this above the ground
   airJabHold: 0.8,           // seconds you and the dummy hang still after a mid-air light jab (each jab resets it)
@@ -100,7 +101,6 @@ const CONFIG = {
   sUpperRise: 5.1,           // m/s: how hard a mid-air special uppercut throws you up (5.1 = about 1.65 m, double your height)
   sJabDamage: 9, sUppercutDamage: 10, sSlamDamage: 10,
   knockScale: 60,           // damage % that doubles all knockback
-  // Dummy fighting back (A/X button or F key turns it on and off)
   // Block bubble uses Brawlhalla's dodge timing (60 frames = 1 second)
   bubbleTimeGround: 16 / 60, // seconds it lasts on the ground (Brawlhalla spot dodge: 16 frames)
   bubbleTimeAir: 20 / 60,    // seconds it lasts in the air (20 frames)
@@ -109,15 +109,25 @@ const CONFIG = {
   bubbleLandCooldown: 75 / 60, // ...but landing soon after cuts it to this, counted from the bubble (75 frames)
   bubbleFistGap: 0.15,       // m: how close your fists have to be to make it
   bubbleSize: 0.6,           // m: bubble radius
-  aiOn: true,
-  aiWalkSpeed: 1.4,          // m/s: how fast the dummy walks toward you
+  // Dummy AI (A/X button or F key cycles off / easy / medium / hard; per-level speeds are in AI_LEVELS)
   aiRange: 0.8,              // m: how close it gets before it starts a punch
   aiReach: 1.1,              // m: how far its punch actually reaches when it lands
-  aiWindup: 0.6,             // seconds its fist glows before the punch (your warning to block or dodge)
-  aiCooldown: 1.5,           // seconds between its punches
   aiDamage: 8,               // % damage its punch does to you
   aiKnock: 3.0,              // m/s: its punch knockback on you (grows with your damage)
   aiJump: 5,                 // m/s: how hard it jumps when you're above it
+  aiUppercutDamage: 9,       // % its uppercut does to you
+  aiUppercutLaunch: 4.5,     // m/s: its uppercut launches you up
+  aiSlamDamage: 10,          // % its jumping slam does to you
+  aiSlamKnock: 3.5,          // m/s: its slam knocks you away and up (45°)
+  aiRecoverJumps: 3,         // air jumps it can use to get back to the stage
+  aiRecoverJump: 6,          // m/s: strength of each recovery jump
+  aiAirDrift: 4,             // m/s²: how hard it steers back toward the stage in the air
+  // Hit-stop: everything you hit freezes for a split second (makes hits feel heavy)
+  hitstopLight: 0.06,        // seconds, light attacks
+  hitstopSpecial: 0.1,       // seconds, specials
+  // Blast zones: fly past any of these and you're knocked out (Brawlhalla style)
+  blastLeft: -14, blastRight: 14, blastBack: -16, blastFront: 12, blastTop: 14, blastBottom: -10,
+  stocks: 3,                 // lives each per match
   playerKnockScale: 60,      // like knockScale, but for your damage
   groundFriction: 5,         // how fast the dummy stops sliding
   gravity: 7.84,
@@ -192,8 +202,11 @@ function groundUnder(p, prevY, margin, tolerance = 0.05) {
   let best = null;
   for (const b of BOXES) {
     if (b.temp) continue;   // air platforms are only for hands
+    // One-sided platforms: only catch you coming down from above (no snapping up while you jump through)
+    if (b.oneWay && p.y > prevY) continue;
+    const tol = b.oneWay ? Math.min(tolerance, 0.05) : tolerance;
     if (p.x > b.min.x - margin && p.x < b.max.x + margin && p.z > b.min.z - margin && p.z < b.max.z + margin &&
-        prevY >= b.max.y - tolerance && p.y <= b.max.y) {
+        prevY >= b.max.y - tol && p.y <= b.max.y) {
       if (best === null || b.max.y > best) best = b.max.y;
     }
   }
@@ -338,15 +351,25 @@ const D = {
   home: new THREE.Vector3(0, 0, -1.8), vel: new THREE.Vector3(),
   damage: 0, flinch: 0, squash: 0, grounded: true, ringOut: 0, ringOuts: 0,
   jabCount: 0, lastJab: -10, stun: 0,
-  ai: 'idle', aiTimer: 0, aiNextAttack: 0, aiNextJump: 0,
+  ai: 'idle', aiTimer: 0, aiNextAttack: 0, aiNextJump: 0, aiMove: 'jab', aiWindupTime: 0.6, comboLeft: 0,
+  stocks: CONFIG.stocks, dodgeUntil: 0, dodgeReadyAt: 0, recoverJumps: CONFIG.aiRecoverJumps, nextRecoverJump: 0,
 };
-let playerDamage = 0, playerFalls = 0;
+let playerDamage = 0, playerFalls = 0, playerStocks = CONFIG.stocks;
+let hitstopUntil = 0;
+// The dummy's dodge bubble
+const dBubble = new THREE.Mesh(new THREE.SphereGeometry(1.25, 20, 14),
+  new THREE.MeshBasicMaterial({ color: 0x4fc3ff, transparent: true, opacity: 0.35, depthWrite: false }));
+dBubble.position.y = 0.85;
+dBubble.visible = false;
+dummy.add(dBubble);
 
 function resetDummy() {
   dummy.position.copy(D.home);
   D.vel.set(0, 0, 0);
   D.damage = 0; D.flinch = 0; D.squash = 0; D.grounded = true; D.ringOut = 0; D.jabCount = 0; D.stun = 0; D.holdUntil = 0;
-  D.ai = 'idle'; D.aiNextAttack = now + 1;
+  D.ai = 'idle'; D.aiNextAttack = now + 1; D.comboLeft = 0; D.dodgeUntil = 0;
+  D.recoverJumps = CONFIG.aiRecoverJumps;
+  dFistMat.emissive.set(0x000000);
   dummy.visible = true;
   drawLabel();
 }
@@ -357,9 +380,14 @@ function drawLabel() {
   const pct = Math.round(D.damage);
   c.fillStyle = 'rgba(16,20,42,0.85)';
   c.beginPath(); c.roundRect(8, 8, 240, 80, 16); c.fill();
-  c.fillStyle = pct >= 100 ? '#ff4f6d' : pct >= 50 ? '#ffd23f' : '#ffffff';
-  c.font = 'bold 56px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
-  c.fillText(`${pct}%`, 128, 50);
+  c.fillStyle = damageColor(pct);
+  c.font = 'bold 50px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(`${pct}%`, 128, 42);
+  // Lives left
+  for (let i = 0; i < CONFIG.stocks; i++) {
+    c.fillStyle = i < D.stocks ? '#7dff9a' : '#3a4060';
+    c.beginPath(); c.arc(128 + (i - (CONFIG.stocks - 1) / 2) * 22, 76, 7, 0, Math.PI * 2); c.fill();
+  }
   labelTex.needsUpdate = true;
 }
 
@@ -612,16 +640,8 @@ function updateMovement(dt) {
   }
   wasHolding = nowHolding;
 
-  // Fell off the stage
-  if (bodyPoint(feet, P).y < -15) {
-    P.copy(SPAWN); P.x -= camera.position.x; P.z -= camera.position.z; P.y += CONFIG.eyeHeight - camera.position.y;
-    bodyVel.set(0, 0, 0); posHistory.length = 0;
-    for (const h of hands) h.touching = false;
-    slamLandingPending = false; slamDropHand = null;
-    playerDamage = 0; playerFalls++;
-    last = { title: 'You fell!', color: '#ff4f6d', sub: 'Back to spawn', detail: '' };
-    log('You fell off. Back to spawn', '#ff4f6d');
-  }
+  // Flew out of a blast zone: knocked out
+  if (outsideBlastZone(bodyPoint(feet, P))) playerKO();
   prevFeetY = bodyPoint(feet, P).y;
 }
 
@@ -707,6 +727,7 @@ function fireAttack(h, kind, detail, dir) {
   const fistPos = h.grip ? h.grip.getWorldPosition(new THREE.Vector3()) : headPos.clone();
   const away = tmpV2;
   let hit = inHitRange(fistPos, dash ? CONFIG.hitRange - CONFIG.dashStopCloser : CONFIG.hitRange, away);
+  if (hit && aiTryDodge()) hit = false;   // the dummy might dodge it
 
   // Attacks that move you
   if (kind === 'SJAB' && moving) {
@@ -735,7 +756,14 @@ function fireAttack(h, kind, detail, dir) {
     launchPlayer(d.clone().multiplyScalar(CONFIG.lightMoveSpeed), t);
     attackMoveVel.copy(d).multiplyScalar(CONFIG.lightMoveSpeed);
     attackMoveUntil = now + t; attackMoveActive = true;
+    // Mid-air and missed right away: keep checking for a hit while you travel
+    if (!hit && !playerGrounded && !hands.some(o => o.touching)) {
+      dashAttack = { h, kind, name, detail, special, until: now + CONFIG.poundHitTime, dir: dir.clone(), range: CONFIG.hitRange, pound: true };
+      last = { title: name, color: ATTACK_COLORS[kind], sub: 'Slamming...', detail: `Punch speed ${detail}` };
+      return;
+    }
   }
+  if (kind === 'POUND' && hit) stopPound();
   if (kind === 'SUPPERCUT' && (playerGrounded || playerNearGround())) {
     // Little hop straight up off the ground
     launchPlayer(new THREE.Vector3(0, CONFIG.sUpperHop, 0), 0.1);
@@ -767,7 +795,7 @@ function fireAttack(h, kind, detail, dir) {
   if (hit && JABS.has(kind)) punchDirection(dir, away);   // jabs and hooks knock the dummy the way your fist went
   const result = hit ? hitDummy(kind, away)
     : aoeHit ? 'Shockwave! ' + hitDummy(kind, away)
-    : 'Missed: dummy out of range';
+    : dummyDodging() ? 'Dodged by the dummy!' : 'Missed: dummy out of range';
   if (aoeHit) hit = true;
   pulse(h, hit ? (special ? 0.9 : 0.6) : 0.15, hit ? (special ? 110 : 70) : 25);
   sound(kind === 'JAB' || kind === 'RUNJAB' ? 1 : 3, hit);
@@ -786,7 +814,14 @@ function inHitRange(fistPos, range, away) {
   // The fist has to be level with the dummy's body, so you can't hit it high in the air from the ground
   const bottom = dummy.position.y, top = bottom + 1.7 * CONFIG.dummyScale;
   const dy = Math.max(bottom - fistPos.y, 0, fistPos.y - top);
-  return dummy.visible && D.ringOut <= 0 && dist <= range && off <= CONFIG.hitConeDeg && dy <= CONFIG.hitHeight;
+  return dummy.visible && D.ringOut <= 0 && !dummyDodging() && dist <= range && off <= CONFIG.hitConeDeg && dy <= CONFIG.hitHeight;
+}
+
+// Light pound connected: stop the carry move dead (sideways and up/down)
+function stopPound() {
+  stopDash();
+  bodyVel.y = 0;
+  attackMoveUntil = 0; attackMoveActive = false;
 }
 
 function stopDash() {
@@ -802,12 +837,13 @@ function updateDashAttack() {
   const a = dashAttack, h = a.h;
   const fistPos = h.grip ? h.grip.getWorldPosition(new THREE.Vector3()) : headPos.clone();
   const away = tmpV2;
-  const hit = inHitRange(fistPos, CONFIG.hitRange - CONFIG.dashStopCloser, away);
+  let hit = inHitRange(fistPos, a.range ?? CONFIG.hitRange - CONFIG.dashStopCloser, away);
+  if (hit && aiTryDodge()) hit = false;
   if (!hit && now < a.until) return;
   dashAttack = null;
-  if (hit) stopDash();
-  if (hit) punchDirection(a.dir, away);
-  const result = hit ? hitDummy(a.kind, away) : 'Missed: dummy out of range';
+  if (hit) a.pound ? stopPound() : stopDash();
+  if (hit && JABS.has(a.kind)) punchDirection(a.dir, away);
+  const result = hit ? hitDummy(a.kind, away) : dummyDodging() ? 'Dodged by the dummy!' : 'Missed: dummy out of range';
   pulse(h, hit ? (a.special ? 0.9 : 0.6) : 0.15, hit ? (a.special ? 110 : 70) : 25);
   sound(a.kind === 'RUNJAB' ? 1 : 3, hit);
   last = { title: a.name, color: ATTACK_COLORS[a.kind], sub: result, detail: `Punch speed ${a.detail}` };
@@ -816,6 +852,7 @@ function updateDashAttack() {
 
 function hitDummy(kind, away) {
   D.holdUntil = 0;
+  hitstopUntil = now + (SPECIALS.has(kind) ? CONFIG.hitstopSpecial : CONFIG.hitstopLight);
   if (D.ai === 'windup') cancelAIAttack();   // your hit interrupts its punch   // any new hit ends a mid-air jab freeze (a jab sets it again)
   const scale = () => 1 + D.damage / CONFIG.knockScale;
 
@@ -916,12 +953,21 @@ function hitDummy(kind, away) {
 
 function updateDummy(dt) {
   dummy.lookAt(tmpV.set(headPos.x, dummy.position.y, headPos.z));
+  dBubble.visible = now < D.dodgeUntil;
 
   if (D.ringOut > 0) {
     D.ringOut -= dt;
-    if (D.ringOut <= 0) resetDummy();
+    if (D.ringOut <= 0 && D.stocks > 0) resetDummy();
     return;
   }
+  if (matchOverAt) return;
+
+  // Hit-stop: frozen and shaking for a split second when a hit lands
+  if (now < hitstopUntil) {
+    pivot.position.x = (Math.random() - 0.5) * 0.08;
+    return;
+  }
+  pivot.position.x = 0;
 
   updateAI(dt);
 
@@ -934,13 +980,16 @@ function updateDummy(dt) {
   const g = groundUnder(p, prevY, 0);
   if (g !== null && D.vel.y <= 0) {
     p.y = g;
-    if (D.vel.y < -3) {
+    if (D.vel.y < -3 && D.ai !== 'slam') {
       // Slammed into the floor: squash and bounce
       D.vel.y = -D.vel.y * CONFIG.bounciness;
       D.squash = 0.3;
       D.grounded = false;
     } else {
       D.vel.y = 0; D.grounded = true;
+      D.recoverJumps = CONFIG.aiRecoverJumps;   // landing refills its air jumps
+      if (D.ai === 'slam') aiSlamLand();
+      else if (D.ai === 'jumping') D.ai = 'idle';
     }
   } else {
     D.grounded = false;
@@ -950,15 +999,9 @@ function updateDummy(dt) {
     const next = Math.max(0, speed - CONFIG.groundFriction * dt);
     if (speed > 0) { D.vel.x *= next / speed; D.vel.z *= next / speed; }
   }
-  if (p.y < -15) {
-    D.ringOut = 1.5; D.ringOuts++;
-    dummy.visible = false;
-    last = { title: 'RING OUT!', color: '#ff4f6d', sub: `Ring-outs: ${D.ringOuts}`, detail: 'Dummy respawns in a moment' };
-    log('RING OUT!', '#ff4f6d');
-    sound(3, true);
-  }
+  if (outsideBlastZone(p)) dummyKO();
 
-  // Stunned dummies flash yellow (they'll be frozen in place once they can move on their own)
+  // Stunned dummies flash yellow and can't act
   D.stun = Math.max(0, D.stun - dt);
   dummyMat.emissive.setHex(D.stun > 0 && Math.sin(now * 25) > 0 ? 0x7a5a00 : 0x000000);
 
@@ -968,23 +1011,170 @@ function updateDummy(dt) {
   pivot.scale.set(1 + D.squash, 1 - D.squash * 1.5, 1 + D.squash);
 }
 
+// ================= KNOCKOUTS, STOCKS & MATCHES =================
+function outsideBlastZone(p) {
+  return p.x < CONFIG.blastLeft || p.x > CONFIG.blastRight || p.z < CONFIG.blastBack || p.z > CONFIG.blastFront ||
+    p.y > CONFIG.blastTop || p.y < CONFIG.blastBottom;
+}
+
+function dummyKO() {
+  const p = dummy.position;
+  // Explosion at the edge it flew out of (pulled in a little so you can see it)
+  const at = new THREE.Vector3(
+    THREE.MathUtils.clamp(p.x, CONFIG.blastLeft + 3, CONFIG.blastRight - 3),
+    THREE.MathUtils.clamp(p.y, CONFIG.blastBottom + 6, CONFIG.blastTop - 3),
+    THREE.MathUtils.clamp(p.z, CONFIG.blastBack + 3, CONFIG.blastFront - 3));
+  spawnExplosion(at, damageColor(D.damage));
+  boom();
+  D.ringOut = 1.5; D.ringOuts++; D.stocks--;
+  D.ai = 'idle'; dFistMat.emissive.set(0x000000);
+  dummy.visible = false;
+  drawLabel();
+  for (const h of hands) pulse(h, 1, 200);
+  if (D.stocks <= 0) {
+    endMatch(true);
+  } else {
+    last = { title: 'RING OUT!', color: '#ff4f6d', sub: `Dummy has ${D.stocks} ${D.stocks === 1 ? 'life' : 'lives'} left`, detail: 'Dummy respawns in a moment' };
+    log('RING OUT!', '#ff4f6d');
+  }
+}
+
+function playerKO() {
+  boom();
+  playerStocks--; playerFalls++;
+  respawnPlayer();
+  if (playerStocks <= 0) {
+    endMatch(false);
+  } else {
+    last = { title: 'You got knocked out!', color: '#ff4f6d', sub: `You have ${playerStocks} ${playerStocks === 1 ? 'life' : 'lives'} left`, detail: '' };
+    log('You were knocked out', '#ff4f6d');
+  }
+}
+
+function respawnPlayer() {
+  P.copy(SPAWN); P.x -= camera.position.x; P.z -= camera.position.z; P.y += CONFIG.eyeHeight - camera.position.y;
+  bodyVel.set(0, 0, 0); posHistory.length = 0;
+  for (const h of hands) h.touching = false;
+  slamLandingPending = false; slamDropHand = null;
+  airHoldUntil = 0; attackMoveUntil = 0; attackMoveActive = false;
+  platformsLeft = CONFIG.airPlatforms;
+  playerDamage = 0;
+}
+
+let matchOverAt = 0;
+function endMatch(won) {
+  matchOverAt = now + 4;
+  last = { title: won ? 'YOU WIN!' : 'YOU LOSE', color: won ? '#7dff9a' : '#ff4f6d', sub: 'New match in 4 seconds', detail: '' };
+  log(won ? 'MATCH WON!' : 'Match lost', won ? '#7dff9a' : '#ff4f6d');
+}
+
+function updateMatch() {
+  if (matchOverAt && now >= matchOverAt) {
+    matchOverAt = 0;
+    playerStocks = CONFIG.stocks; D.stocks = CONFIG.stocks;
+    respawnPlayer();
+    resetDummy();
+    last = { title: 'FIGHT!', color: '#ffd23f', sub: `${CONFIG.stocks} lives each`, detail: '' };
+    log('New match', '#ffd23f');
+  }
+}
+
+// Ring-out explosion: a burst of glowing bits plus an expanding ring
+const burstGeo = new THREE.SphereGeometry(0.12, 6, 4);
+const bursts = [];
+function spawnExplosion(at, color) {
+  for (let i = 0; i < 40; i++) {
+    const m = new THREE.Mesh(burstGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1, depthWrite: false }));
+    m.position.copy(at);
+    const v = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar(4 + Math.random() * 8);
+    m.userData = { v, born: now, life: 0.8 + Math.random() * 0.6 };
+    scene.add(m); bursts.push(m);
+  }
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(1, 0.08, 6, 32), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1, depthWrite: false }));
+  ring.position.copy(at);
+  ring.lookAt(headPos);
+  ring.userData = { ring: true, born: now, life: 0.6 };
+  scene.add(ring); bursts.push(ring);
+}
+function updateBursts(dt) {
+  for (let i = bursts.length - 1; i >= 0; i--) {
+    const m = bursts[i], u = m.userData, t = (now - u.born) / u.life;
+    if (t >= 1) { scene.remove(m); m.material.dispose(); if (u.ring) m.geometry.dispose(); bursts.splice(i, 1); continue; }
+    m.material.opacity = 1 - t;
+    if (u.ring) m.scale.setScalar(0.5 + t * 6);
+    else { m.position.addScaledVector(u.v, dt); u.v.multiplyScalar(Math.pow(0.15, dt)); m.scale.setScalar(1 - t * 0.6); }
+  }
+}
+
+// A deep "boom" for knockouts
+function boom() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = 'sawtooth';
+  o.frequency.setValueAtTime(160, t);
+  o.frequency.exponentialRampToValueAtTime(30, t + 0.7);
+  g.gain.setValueAtTime(0.35, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.8);
+  o.connect(g).connect(actx.destination);
+  o.start(t); o.stop(t + 0.85);
+}
+
+// Damage color: white -> yellow -> orange -> red -> dark red (like Brawlhalla)
+const DAMAGE_STEPS = [[0, '#ffffff'], [50, '#ffe14f'], [100, '#ff8a2a'], [150, '#ff2a2a'], [200, '#8a0000']];
+function damageColor(pct) {
+  for (let i = 1; i < DAMAGE_STEPS.length; i++) {
+    const [p1, c1] = DAMAGE_STEPS[i];
+    if (pct <= p1) {
+      const [p0, c0] = DAMAGE_STEPS[i - 1];
+      return '#' + new THREE.Color(c0).lerp(new THREE.Color(c1), (pct - p0) / (p1 - p0)).getHexString();
+    }
+  }
+  return DAMAGE_STEPS[DAMAGE_STEPS.length - 1][1];
+}
+
 // ================= DUMMY AI =================
+// Difficulty levels (A/X button or F key cycles: off -> easy -> medium -> hard)
+const AI_LEVELS = [
+  null,
+  { name: 'EASY',   windup: 0.8, cooldown: 2.0, walk: 1.0, dodge: 0,    combo: 0,   uppercut: 0.15, recover: 1 },
+  { name: 'MEDIUM', windup: 0.6, cooldown: 1.5, walk: 1.4, dodge: 0.25, combo: 0.3, uppercut: 0.3,  recover: 2 },
+  { name: 'HARD',   windup: 0.4, cooldown: 1.0, walk: 1.8, dodge: 0.5,  combo: 0.6, uppercut: 0.4,  recover: 3 },
+];
+let aiLevel = 2;
+const AI = () => AI_LEVELS[aiLevel];
+
 function toggleAI() {
-  CONFIG.aiOn = !CONFIG.aiOn;
+  aiLevel = (aiLevel + 1) % AI_LEVELS.length;
   cancelAIAttack();
-  log(`Dummy fighting back: ${CONFIG.aiOn ? 'ON' : 'OFF'}`, '#ff9a4f');
-  last = { title: CONFIG.aiOn ? 'Dummy fights back' : 'Dummy is passive', color: '#ff9a4f', sub: 'A / X button toggles this', detail: '' };
+  const name = aiLevel ? AI().name : 'OFF';
+  log(`Dummy AI: ${name}`, '#ff9a4f');
+  last = { title: aiLevel ? `Dummy AI: ${name}` : 'Dummy is passive', color: '#ff9a4f', sub: 'A / X button changes this', detail: '' };
 }
 
 function cancelAIAttack() {
   if (D.ai === 'windup') D.aiNextAttack = now + 0.5;
-  D.ai = 'idle';
+  if (D.ai !== 'jumping' && D.ai !== 'slam') D.ai = 'idle';
+  D.comboLeft = 0;
   dFistMat.emissive.set(0x000000);
 }
 
 function playerBlocking() {
   return now < bubbleUntil;
 }
+
+// The dummy's own dodge bubble (only when it isn't stunned or reeling from a hit)
+function aiTryDodge() {
+  if (!aiLevel || D.stun > 0 || D.flinch > 0 || now < D.holdUntil || now < D.dodgeReadyAt || D.ringOut > 0) return false;
+  if (Math.random() >= AI().dodge) return false;
+  const air = !D.grounded;
+  D.dodgeUntil = now + (air ? CONFIG.bubbleTimeAir : CONFIG.bubbleTimeGround);
+  D.dodgeReadyAt = now + (air ? CONFIG.bubbleCooldownAir : CONFIG.bubbleCooldownGround);
+  cancelAIAttack();
+  log('Dummy dodged!', '#4fc3ff');
+  return true;
+}
+function dummyDodging() { return now < D.dodgeUntil; }
 
 // ================= BLOCK BUBBLE =================
 // Touch both fists together: a bubble pops up around you for a moment and blocks every hit
@@ -1025,14 +1215,20 @@ function updateBubble() {
 }
 
 function updateAI(dt) {
-  const fistOut = D.ai === 'strike' ? Math.max(0, 1 - (now - D.aiTimer) / 0.25) : 0;
-  dFist.position.set(D_FIST_REST.x, D_FIST_REST.y,
-    D.ai === 'windup' ? D_FIST_REST.z - 0.2 : D_FIST_REST.z + fistOut * 0.6);
-  if (D.ai === 'strike' && fistOut <= 0) D.ai = 'idle';
+  // Fist animation: pulled back (jab) or dropped low (uppercut) while winding up, then thrown out
+  const out = D.ai === 'strike' ? Math.max(0, 1 - (now - D.aiTimer) / 0.25) : 0;
+  const upper = D.aiMove === 'uppercut';
+  if (D.ai === 'windup') dFist.position.set(D_FIST_REST.x, upper ? 0.5 : D_FIST_REST.y, D_FIST_REST.z - 0.2);
+  else if (upper) dFist.position.set(D_FIST_REST.x, D_FIST_REST.y + out * 0.7, D_FIST_REST.z + out * 0.2);
+  else dFist.position.set(D_FIST_REST.x, D_FIST_REST.y, D_FIST_REST.z + out * 0.6);
+  if (D.ai === 'strike' && out <= 0) {
+    D.ai = 'idle';
+    // Combo: throw the next punch quickly
+    if (D.comboLeft > 0) { D.comboLeft--; D.ai = 'windup'; D.aiTimer = now; D.aiWindupTime = 0.2; D.aiMove = 'jab'; }
+  }
 
-  // It can't act while switched off, flying, stunned, flinching or frozen in a jab combo
-  const busy = !CONFIG.aiOn || !D.grounded || D.stun > 0 || D.flinch > 0 || now < D.holdUntil;
-  if (busy) { if (D.ai === 'windup') cancelAIAttack(); return; }
+  if (!aiLevel || matchOverAt) { if (D.ai === 'windup') cancelAIAttack(); return; }
+  const reeling = D.stun > 0 || D.flinch > 0 || now < D.holdUntil;
 
   const me = dummy.position;
   bodyPoint(tmpV3, P);   // your feet
@@ -1040,26 +1236,45 @@ function updateAI(dt) {
   const dist = Math.hypot(dx, dz);
   const dirX = dist > 0.001 ? dx / dist : 0, dirZ = dist > 0.001 ? dz / dist : 1;
 
+  // In the air
+  if (!D.grounded) {
+    if (D.ai === 'windup') cancelAIAttack();
+    if (reeling) return;
+    // Off the stage: drift back and use air jumps to recover
+    if (groundBelow(me, 40) === null) { aiRecover(dt); return; }
+    // Above you after a jump: slam down on you
+    if (D.ai === 'jumping' && me.y - tmpV3.y > 0.3 && dist < 1.0) {
+      D.ai = 'slam';
+      D.vel.set(dirX * 1.5, -9, dirZ * 1.5);
+    }
+    return;
+  }
+  if (reeling) { if (D.ai === 'windup') cancelAIAttack(); return; }
+
   if (D.ai === 'windup') {
-    // Fist glows brighter until the punch comes out
-    const t = (now - D.aiTimer) / CONFIG.aiWindup;
-    dFistMat.emissive.setRGB(0.9 * t, 0.05, 0);
+    // Fist glows brighter until the punch comes out (orange for an uppercut, red for a jab)
+    const t = (now - D.aiTimer) / D.aiWindupTime;
+    if (D.aiMove === 'uppercut') dFistMat.emissive.setRGB(0.9 * t, 0.5 * t, 0);
+    else dFistMat.emissive.setRGB(0.9 * t, 0.05, 0);
     if (t >= 1) aiStrike(dirX, dirZ, dist);
     return;
   }
   if (D.ai === 'strike') return;
 
-  // You're well above it and fairly close: jump at you
-  if (tmpV3.y - me.y > 0.8 && dist < 2.5 && now > D.aiNextJump) {
+  const above = tmpV3.y - me.y;
+  // You're well above it and fairly close: jump at you (it may slam down on you)
+  if (above > 0.8 && dist < 2.5 && now > D.aiNextJump) {
     D.vel.set(dirX * 1.5, CONFIG.aiJump, dirZ * 1.5);
-    D.grounded = false;
+    D.grounded = false; D.ai = 'jumping';
     D.aiNextJump = now + 2;
     return;
   }
 
-  // Close enough: start a punch
-  if (dist <= CONFIG.aiRange && Math.abs(tmpV3.y - me.y) < 0.8 && now > D.aiNextAttack) {
-    D.ai = 'windup'; D.aiTimer = now;
+  // Close enough: start an attack. Uppercut if you're a bit above it (or sometimes at random)
+  if (dist <= CONFIG.aiRange && above < 1.2 && above > -0.8 && now > D.aiNextAttack) {
+    D.aiMove = above > 0.3 || Math.random() < AI().uppercut ? 'uppercut' : 'jab';
+    D.comboLeft = D.aiMove === 'jab' && Math.random() < AI().combo ? 1 : 0;
+    D.ai = 'windup'; D.aiTimer = now; D.aiWindupTime = AI().windup;
     D.vel.x = 0; D.vel.z = 0;
     return;
   }
@@ -1068,39 +1283,103 @@ function updateAI(dt) {
   if (dist > CONFIG.aiRange * 0.8) {
     const ahead = tmpV4.set(me.x + dirX * 0.4, me.y + 0.05, me.z + dirZ * 0.4);
     if (groundBelow(ahead, 0.3) !== null) {
-      D.vel.x = dirX * CONFIG.aiWalkSpeed;
-      D.vel.z = dirZ * CONFIG.aiWalkSpeed;
+      D.vel.x = dirX * AI().walk;
+      D.vel.z = dirZ * AI().walk;
     }
+  }
+}
+
+// Off the stage: steer back toward it and jump when falling
+function aiRecover(dt) {
+  const me = dummy.position;
+  const tx = THREE.MathUtils.clamp(me.x, -5, 5), tz = THREE.MathUtils.clamp(me.z, -6, 2);
+  const hx = tx - me.x, hz = tz - me.z, hd = Math.hypot(hx, hz);
+  if (hd > 0.01) {
+    // Air drift toward the stage (easy dummies drift less)
+    const drift = CONFIG.aiAirDrift * (0.5 + AI().recover * 0.25) * dt;
+    const towardSpeed = (D.vel.x * hx + D.vel.z * hz) / hd;
+    if (towardSpeed < 3) { D.vel.x += hx / hd * drift; D.vel.z += hz / hd * drift; }   // steer, but don't keep speeding up
+  }
+  const jumpsAllowed = Math.min(CONFIG.aiRecoverJumps, AI().recover);
+  const used = CONFIG.aiRecoverJumps - D.recoverJumps;
+  if (used < jumpsAllowed && D.vel.y < 0 && me.y < 1.5 && now > D.nextRecoverJump) {
+    D.recoverJumps--;
+    D.nextRecoverJump = now + 0.35;
+    const toward = Math.min(3, hd * 2);
+    D.vel.set(hd > 0.01 ? hx / hd * toward : 0, CONFIG.aiRecoverJump, hd > 0.01 ? hz / hd * toward : 0);
+    spawnExplosionSmall(me);
+  }
+}
+
+// Little puff under the dummy when it air-jumps
+function spawnExplosionSmall(at) {
+  for (let i = 0; i < 8; i++) {
+    const m = new THREE.Mesh(burstGeo, new THREE.MeshBasicMaterial({ color: 0x7ff0ff, transparent: true, opacity: 1, depthWrite: false }));
+    m.position.copy(at);
+    m.scale.setScalar(0.5);
+    const a = i / 8 * Math.PI * 2;
+    m.userData = { v: new THREE.Vector3(Math.cos(a) * 2, -1, Math.sin(a) * 2), born: now, life: 0.35 };
+    scene.add(m); bursts.push(m);
   }
 }
 
 function aiStrike(dirX, dirZ, dist) {
   D.ai = 'strike'; D.aiTimer = now;
-  D.aiNextAttack = now + CONFIG.aiCooldown;
+  D.aiNextAttack = now + AI().cooldown;
   dFistMat.emissive.set(0x000000);
 
+  const upper = D.aiMove === 'uppercut';
   const feetY = bodyPoint(tmpV3, P).y;
   const fistY = dummy.position.y + D_FIST_REST.y * CONFIG.dummyScale;
-  const inReach = dist <= CONFIG.aiReach && fistY > feetY - 0.2 && fistY < feetY + CONFIG.eyeHeight + 0.3;
-  if (!inReach) { sound(1, false); log('Dummy punch (missed you)', '#ff9a4f'); return; }
+  const inReach = dist <= CONFIG.aiReach && fistY > feetY - 0.2 && fistY < feetY + CONFIG.eyeHeight + (upper ? 0.9 : 0.3);
+  if (!inReach) { D.comboLeft = 0; sound(1, false); log('Dummy punch (missed you)', '#ff9a4f'); return; }
 
+  const comboHit = D.comboLeft > 0;   // first punch of a combo: light, keeps you close
+  if (upper) {
+    hitPlayer('uppercut', CONFIG.aiUppercutDamage, (power) => new THREE.Vector3(dirX * power * 0.25, power, dirZ * power * 0.25), CONFIG.aiUppercutLaunch);
+  } else if (comboHit) {
+    hitPlayer('jab', CONFIG.aiDamage * 0.5, () => new THREE.Vector3(dirX * 0.6, 0.5, dirZ * 0.6), 0);
+  } else {
+    hitPlayer('jab', CONFIG.aiDamage, (power) => new THREE.Vector3(dirX * power, power * 0.4, dirZ * power), CONFIG.aiKnock);
+  }
+}
+
+// Slam landing next to you: shockwave + a little crater
+function aiSlamLand() {
+  D.ai = 'idle';
+  D.squash = 0.4;
+  spawnCrater(dummy.position.x, dummy.position.y, dummy.position.z);
+  sound(3, false);
+  const feet = bodyPoint(tmpV3, P);
+  const dx = feet.x - dummy.position.x, dz = feet.z - dummy.position.z, d = Math.hypot(dx, dz);
+  if (d > 1.2 || Math.abs(feet.y - dummy.position.y) > 0.6) return;
+  const ux = d > 0.01 ? dx / d : 0, uz = d > 0.01 ? dz / d : 1;
+  hitPlayer('slam', CONFIG.aiSlamDamage, (power) => new THREE.Vector3(ux * power, power, uz * power), CONFIG.aiSlamKnock);
+}
+
+// The dummy lands a hit on you. `vel(power)` gives your knockback for the given power.
+function hitPlayer(name, damage, vel, base) {
   if (playerBlocking()) {
     // Blocked: no damage, just a small shove
-    launchPlayer(new THREE.Vector3(dirX * 1.0, 0, dirZ * 1.0), 0.1);
+    const v = vel(1); v.y = 0;
+    if (v.lengthSq() > 0) v.setLength(1);
+    launchPlayer(v, 0.1);
     for (const h of hands) pulse(h, 0.5, 60);
     sound(1, true);
+    D.comboLeft = 0;
     last = { title: 'Blocked!', color: '#4fc3ff', sub: 'No damage', detail: '' };
     log('Blocked the dummy', '#4fc3ff');
     return;
   }
-
-  playerDamage += CONFIG.aiDamage;
-  const power = CONFIG.aiKnock * (1 + playerDamage / CONFIG.playerKnockScale);
-  launchPlayer(new THREE.Vector3(dirX * power, power * 0.4, dirZ * power), 0.25);
+  playerDamage += damage;
+  const power = base * (1 + playerDamage / CONFIG.playerKnockScale);
+  launchPlayer(vel(power), 0.25);
+  hitstopUntil = now + CONFIG.hitstopLight;
   for (const h of hands) pulse(h, 1, 150);
   sound(3, true);
-  last = { title: 'You got hit!', color: '#ff4f6d', sub: `Knockback ${power.toFixed(1)} m/s · you're at ${Math.round(playerDamage)}%`, detail: 'Touch your fists together to block' };
-  log(`Dummy hit you (+${CONFIG.aiDamage}%)`, '#ff4f6d');
+  const names = { jab: 'punched', uppercut: 'uppercutted', slam: 'slammed' };
+  last = { title: `Dummy ${names[name]} you!`, color: '#ff4f6d', sub: `You're at ${Math.round(playerDamage)}%`, detail: 'Touch your fists together to block' };
+  log(`Dummy ${names[name]} you (+${Math.round(damage)}%)`, '#ff4f6d');
 }
 
 // ================= FEEDBACK =================
@@ -1139,7 +1418,7 @@ function groundBelow(p, reach) {
 
 // If the dummy is standing within the shockwave, returns the direction to knock it (else null)
 function shockwaveHits(x, gy, z) {
-  if (!dummy.visible || D.ringOut > 0 || Math.abs(dummy.position.y - gy) > 0.3) return null;
+  if (!dummy.visible || D.ringOut > 0 || dummyDodging() || Math.abs(dummy.position.y - gy) > 0.3) return null;
   const v = new THREE.Vector3(dummy.position.x - x, 0, dummy.position.z - z);
   const d = v.length();
   if (d > CONFIG.craterRadius) return null;
@@ -1293,7 +1572,8 @@ function drawPanel() {
   }
 
   c.fillStyle = '#8a93c4'; c.font = '22px sans-serif';
-  c.fillText(`You: ${Math.round(playerDamage)}%  ·  Dummy: ${Math.round(D.damage)}%  ·  Ring-outs: ${D.ringOuts}  ·  Dummy fights back: ${CONFIG.aiOn ? 'ON' : 'off'} (A/X)`, 40, H - 58);
+  const lives = n => '●'.repeat(Math.max(0, n)) + '○'.repeat(Math.max(0, CONFIG.stocks - n));
+  c.fillText(`You ${lives(playerStocks)} ${Math.round(playerDamage)}%  ·  Dummy ${lives(D.stocks)} ${Math.round(D.damage)}%  ·  AI: ${aiLevel ? AI().name : 'OFF'} (A/X)`, 40, H - 58);
   const bubbleLeft = bubbleReadyAt - now;
   c.fillText(`Jab combo: ${D.jabCount}/4  ·  Air jumps: ${platformsLeft}/${CONFIG.airPlatforms}  ·  Block bubble: ${bubbleLeft > 0 ? bubbleLeft.toFixed(1) + ' s' : 'ready'}`, 40, H - 28);
   panelTex.needsUpdate = true;
@@ -1351,6 +1631,8 @@ renderer.setAnimationLoop(() => {
     }
   }
   updateDummy(dt);
+  updateBursts(dt);
+  updateMatch();
 
   panelTimer -= dt;
   if (panelTimer <= 0) { drawPanel(); panelTimer = 0.1; }
